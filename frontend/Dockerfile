@@ -12,8 +12,7 @@ RUN npm cache clean --force && \
     npm install --no-optional
 
 # Copy all source files and public directory
-COPY public/ ./public/
-COPY src/ ./src/
+COPY . .
 
 # Build the application
 RUN npm run build
