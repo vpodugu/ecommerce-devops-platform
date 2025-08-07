@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const database = require('../config/database');
 const logger = require('../utils/logger');
 
 /**
@@ -8,7 +7,7 @@ const logger = require('../utils/logger');
  * /health:
  *   get:
  *     summary: Health check endpoint
- *     description: Returns the health status of the user service
+ *     description: Returns the health status of the API gateway
  *     tags: [Health]
  *     responses:
  *       200:
@@ -23,37 +22,24 @@ const logger = require('../utils/logger');
  *                   example: "healthy"
  *                 service:
  *                   type: string
- *                   example: "user-service"
+ *                   example: "api-gateway"
  *                 timestamp:
  *                   type: string
  *                   format: date-time
  *                 uptime:
  *                   type: number
  *                   example: 123.456
- *                 database:
- *                   type: string
- *                   example: "connected"
  */
 router.get('/', async (req, res) => {
   try {
     const health = {
       status: 'healthy',
-      service: 'user-service',
+      service: 'api-gateway',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       version: '1.0.0',
       environment: process.env.NODE_ENV || 'development'
     };
-
-    // Check database connection
-    try {
-      await database.testConnection();
-      health.database = 'connected';
-    } catch (error) {
-      health.database = 'disconnected';
-      health.status = 'unhealthy';
-      logger.error('Database health check failed:', error);
-    }
 
     // Check memory usage
     const memUsage = process.memoryUsage();
@@ -63,13 +49,12 @@ router.get('/', async (req, res) => {
       heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) // MB
     };
 
-    const statusCode = health.status === 'healthy' ? 200 : 503;
-    res.status(statusCode).json(health);
+    res.status(200).json(health);
   } catch (error) {
     logger.error('Health check error:', error);
     res.status(503).json({
       status: 'unhealthy',
-      service: 'user-service',
+      service: 'api-gateway',
       timestamp: new Date().toISOString(),
       error: error.message
     });
@@ -86,28 +71,13 @@ router.get('/', async (req, res) => {
  *     responses:
  *       200:
  *         description: Service is ready
- *       503:
- *         description: Service is not ready
  */
-router.get('/ready', async (req, res) => {
-  try {
-    // Check if database is connected
-    await database.testConnection();
-    
-    res.status(200).json({
-      status: 'ready',
-      service: 'user-service',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    logger.error('Readiness check failed:', error);
-    res.status(503).json({
-      status: 'not ready',
-      service: 'user-service',
-      timestamp: new Date().toISOString(),
-      error: 'Database connection failed'
-    });
-  }
+router.get('/ready', (req, res) => {
+  res.status(200).json({
+    status: 'ready',
+    service: 'api-gateway',
+    timestamp: new Date().toISOString()
+  });
 });
 
 /**
@@ -124,7 +94,7 @@ router.get('/ready', async (req, res) => {
 router.get('/live', (req, res) => {
   res.status(200).json({
     status: 'alive',
-    service: 'user-service',
+    service: 'api-gateway',
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
