@@ -41,7 +41,7 @@ ssh -i your-key.pem ec2-user@your-instance-public-ip
 ### Update System
 ```bash
 sudo yum update -y
-sudo yum install -y git docker docker-compose-plugin
+sudo yum install -y git docker curl wget vim htop httpd-tools
 ```
 
 ### Start Docker Service
@@ -49,12 +49,32 @@ sudo yum install -y git docker docker-compose-plugin
 sudo systemctl start docker
 sudo systemctl enable docker
 sudo usermod -aG docker ec2-user
-# Logout and login again for group changes to take effect
+
+# IMPORTANT: You must logout and login again for group changes to take effect
+# OR restart the Docker daemon to apply group changes immediately
+sudo systemctl restart docker
+
+# Alternative: Start a new shell session
+newgrp docker
+```
+
+### Install Docker Compose (Correct Method)
+```bash
+# Method 1: Install Docker Compose using pip (Recommended)
+sudo yum install -y python3-pip
+sudo pip3 install docker-compose
+
+# Method 2: Install Docker Compose using curl (Alternative)
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Verify installation
+docker-compose --version
 ```
 
 ### Install Additional Tools
 ```bash
-sudo yum install -y curl wget vim htop
+sudo yum install -y curl wget vim htop httpd-tools jq
 ```
 
 ## Step 3: Clone and Setup Project
@@ -89,7 +109,9 @@ EOF
 
 ## Step 4: Build and Start Services
 
-### Build All Services
+### Option A: Using Docker Compose (Recommended for Development)
+
+#### Build All Services
 ```bash
 # Build all Docker images
 docker-compose build
@@ -98,7 +120,7 @@ docker-compose build
 docker images
 ```
 
-### Start All Services
+#### Start All Services
 ```bash
 # Start all services
 docker-compose up -d
@@ -110,7 +132,313 @@ docker-compose ps
 docker-compose logs -f
 ```
 
-## Step 5: Verify Service Health
+### Option B: Manual Docker Container Deployment (Production-like)
+
+This approach gives you full control over each container and mimics production deployment scenarios.
+
+#### Step 4B.1: Create Docker Network
+```bash
+# Create a custom network for inter-service communication
+docker network create ecommerce-network
+
+# Verify network creation
+docker network ls
+docker network inspect ecommerce-network
+```
+
+#### Step 4B.2: Start Database Containers
+
+```bash
+# Start User Service Database
+docker run -d \
+  --name ecommerce_user_db \
+  --network ecommerce-network \
+  -e MYSQL_ROOT_PASSWORD=rootpassword \
+  -e MYSQL_DATABASE=user_service \
+  -e MYSQL_USER=user_service \
+  -e MYSQL_PASSWORD=user_service_pass \
+  -p 3306:3306 \
+  -v user_db_data:/var/lib/mysql \
+  -v $(pwd)/services/user-service/database/init.sql:/docker-entrypoint-initdb.d/init.sql \
+  --restart unless-stopped \
+  mysql:8.0
+
+# Start Product Service Database
+docker run -d \
+  --name ecommerce_product_db \
+  --network ecommerce-network \
+  -e MYSQL_ROOT_PASSWORD=rootpassword \
+  -e MYSQL_DATABASE=product_service \
+  -e MYSQL_USER=product_service \
+  -e MYSQL_PASSWORD=product_service_pass \
+  -p 3307:3306 \
+  -v product_db_data:/var/lib/mysql \
+  -v $(pwd)/services/product-service/database/init.sql:/docker-entrypoint-initdb.d/init.sql \
+  --restart unless-stopped \
+  mysql:8.0
+
+# Start Order Service Database
+docker run -d \
+  --name ecommerce_order_db \
+  --network ecommerce-network \
+  -e MYSQL_ROOT_PASSWORD=rootpassword \
+  -e MYSQL_DATABASE=order_service \
+  -e MYSQL_USER=order_service \
+  -e MYSQL_PASSWORD=order_service_pass \
+  -p 3308:3306 \
+  -v order_db_data:/var/lib/mysql \
+  -v $(pwd)/services/order-service/database/init.sql:/docker-entrypoint-initdb.d/init.sql \
+  --restart unless-stopped \
+  mysql:8.0
+
+# Start Redis Cache
+docker run -d \
+  --name ecommerce_redis \
+  --network ecommerce-network \
+  -e REDIS_PASSWORD=redis_password \
+  -p 6379:6379 \
+  -v redis_data:/data \
+  --restart unless-stopped \
+  redis:7-alpine redis-server --requirepass redis_password
+```
+
+#### Step 4B.3: Wait for Databases to Initialize
+```bash
+# Wait for databases to be ready
+echo "Waiting for databases to initialize..."
+sleep 30
+
+# Verify database containers are running
+docker ps | grep mysql
+docker ps | grep redis
+
+# Test database connections
+docker exec ecommerce_user_db mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null && echo "✅ User DB Ready" || echo "❌ User DB Not Ready"
+docker exec ecommerce_product_db mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null && echo "✅ Product DB Ready" || echo "❌ Product DB Not Ready"
+docker exec ecommerce_order_db mysql -u root -prootpassword -e "SELECT 1;" 2>/dev/null && echo "✅ Order DB Ready" || echo "❌ Order DB Not Ready"
+```
+
+#### Step 4B.4: Build Microservice Images
+```bash
+# Build User Service
+docker build -t ecommerce/user-service:latest ./services/user-service/
+
+# Build Product Service
+docker build -t ecommerce/product-service:latest ./services/product-service/
+
+# Build Order Service
+docker build -t ecommerce/order-service:latest ./services/order-service/
+
+# Build API Gateway
+docker build -t ecommerce/api-gateway:latest ./services/api-gateway/
+
+# Build Frontend
+docker build -t ecommerce/frontend:latest ./frontend/
+
+# Verify all images are built
+docker images | grep ecommerce
+```
+
+#### Step 4B.5: Start Microservice Containers
+
+```bash
+# Start User Service
+docker run -d \
+  --name ecommerce-user-service \
+  --network ecommerce-network \
+  -p 3001:3001 \
+  -e NODE_ENV=production \
+  -e DB_HOST=ecommerce_user_db \
+  -e DB_PORT=3306 \
+  -e DB_USER=user_service \
+  -e DB_PASSWORD=user_service_pass \
+  -e DB_NAME=user_service \
+  -e REDIS_HOST=ecommerce_redis \
+  -e REDIS_PORT=6379 \
+  -e REDIS_PASSWORD=redis_password \
+  -e JWT_SECRET=your-super-secret-jwt-key \
+  --restart unless-stopped \
+  ecommerce/user-service:latest
+
+# Start Product Service
+docker run -d \
+  --name ecommerce-product-service \
+  --network ecommerce-network \
+  -p 3002:3002 \
+  -e NODE_ENV=production \
+  -e DB_HOST=ecommerce_product_db \
+  -e DB_PORT=3306 \
+  -e DB_USER=product_service \
+  -e DB_PASSWORD=product_service_pass \
+  -e DB_NAME=product_service \
+  -e REDIS_HOST=ecommerce_redis \
+  -e REDIS_PORT=6379 \
+  -e REDIS_PASSWORD=redis_password \
+  --restart unless-stopped \
+  ecommerce/product-service:latest
+
+# Start Order Service
+docker run -d \
+  --name ecommerce-order-service \
+  --network ecommerce-network \
+  -p 3003:3003 \
+  -e NODE_ENV=production \
+  -e DB_HOST=ecommerce_order_db \
+  -e DB_PORT=3306 \
+  -e DB_USER=order_service \
+  -e DB_PASSWORD=order_service_pass \
+  -e DB_NAME=order_service \
+  -e REDIS_HOST=ecommerce_redis \
+  -e REDIS_PORT=6379 \
+  -e REDIS_PASSWORD=redis_password \
+  -e USER_SERVICE_URL=http://ecommerce-user-service:3001 \
+  -e PRODUCT_SERVICE_URL=http://ecommerce-product-service:3002 \
+  --restart unless-stopped \
+  ecommerce/order-service:latest
+
+# Start API Gateway
+docker run -d \
+  --name ecommerce-api-gateway \
+  --network ecommerce-network \
+  -p 8080:8080 \
+  -e NODE_ENV=production \
+  -e USER_SERVICE_URL=http://ecommerce-user-service:3001 \
+  -e PRODUCT_SERVICE_URL=http://ecommerce-product-service:3002 \
+  -e ORDER_SERVICE_URL=http://ecommerce-order-service:3003 \
+  --restart unless-stopped \
+  ecommerce/api-gateway:latest
+
+# Start Frontend
+docker run -d \
+  --name ecommerce-frontend \
+  --network ecommerce-network \
+  -p 80:80 \
+  -e REACT_APP_API_URL=http://localhost:8080 \
+  --restart unless-stopped \
+  ecommerce/frontend:latest
+```
+
+#### Step 4B.6: Verify All Containers Are Running
+```bash
+# Check all containers status
+docker ps
+
+# Check container logs for any errors
+docker logs ecommerce-user-service
+docker logs ecommerce-product-service
+docker logs ecommerce-order-service
+docker logs ecommerce-api-gateway
+docker logs ecommerce-frontend
+
+# Check network connectivity
+docker network inspect ecommerce-network
+```
+
+#### Step 4B.7: Health Check All Services
+```bash
+# Test health endpoints
+echo "Testing service health..."
+
+# User Service
+curl -s http://localhost:3001/health | jq . || echo "User Service not responding"
+
+# Product Service
+curl -s http://localhost:3002/health | jq . || echo "Product Service not responding"
+
+# Order Service
+curl -s http://localhost:3003/health | jq . || echo "Order Service not responding"
+
+# API Gateway
+curl -s http://localhost:8080/health | jq . || echo "API Gateway not responding"
+
+# Frontend (should return HTML)
+curl -s -I http://localhost:80 | head -1 || echo "Frontend not responding"
+```
+
+#### Step 4B.8: Manual Container Management Commands
+
+```bash
+# View real-time logs
+docker logs -f ecommerce-user-service &
+docker logs -f ecommerce-product-service &
+docker logs -f ecommerce-order-service &
+docker logs -f ecommerce-api-gateway &
+
+# Stop specific service
+docker stop ecommerce-user-service
+
+# Start specific service
+docker start ecommerce-user-service
+
+# Restart specific service
+docker restart ecommerce-user-service
+
+# Remove specific container
+docker rm -f ecommerce-user-service
+
+# Update specific service (pull new image and restart)
+docker pull ecommerce/user-service:latest
+docker stop ecommerce-user-service
+docker rm ecommerce-user-service
+# Then run the docker run command again for user-service
+
+# Scale specific service (run multiple instances)
+docker run -d --name ecommerce-user-service-2 --network ecommerce-network -p 3004:3001 [other-options] ecommerce/user-service:latest
+```
+
+#### Step 4B.9: Cleanup Manual Deployment
+```bash
+# Stop all containers
+docker stop ecommerce-user-service ecommerce-product-service ecommerce-order-service ecommerce-api-gateway ecommerce-frontend
+docker stop ecommerce_user_db ecommerce_product_db ecommerce_order_db ecommerce_redis
+
+# Remove all containers
+docker rm ecommerce-user-service ecommerce-product-service ecommerce-order-service ecommerce-api-gateway ecommerce-frontend
+docker rm ecommerce_user_db ecommerce_product_db ecommerce_order_db ecommerce_redis
+
+# Remove volumes (WARNING: This will delete all data)
+docker volume rm user_db_data product_db_data order_db_data redis_data
+
+# Remove network
+docker network rm ecommerce-network
+
+# Remove images
+docker rmi ecommerce/user-service:latest ecommerce/product-service:latest ecommerce/order-service:latest ecommerce/api-gateway:latest ecommerce/frontend:latest
+```
+
+## Step 5: Understanding Deployment Methods
+
+### Docker Compose vs Manual Deployment
+
+#### When to Use Docker Compose:
+- **Development environments** - Quick setup and teardown
+- **Testing scenarios** - Consistent environment across team
+- **Simple deployments** - When you need all services or nothing
+- **Learning and experimentation** - Easy to understand and modify
+- **CI/CD pipelines** - Automated testing environments
+
+#### When to Use Manual Docker Deployment:
+- **Production environments** - Fine-grained control over each service
+- **Microservices architecture** - Independent scaling and updates
+- **Complex networking** - Custom network configurations
+- **Resource optimization** - Specific resource allocation per container
+- **Service isolation** - Independent lifecycle management
+- **Learning Docker fundamentals** - Understanding underlying commands
+
+#### Key Differences:
+
+| Aspect | Docker Compose | Manual Docker |
+|--------|----------------|---------------|
+| **Setup** | Single `docker-compose up` | Multiple `docker run` commands |
+| **Configuration** | YAML file | Command-line arguments |
+| **Networking** | Automatic network creation | Manual network setup |
+| **Service Discovery** | Automatic via service names | Manual hostname configuration |
+| **Scaling** | `docker-compose up --scale` | Manual container replication |
+| **Updates** | `docker-compose up --build` | Manual stop/remove/run cycle |
+| **Debugging** | `docker-compose logs` | Individual `docker logs` |
+| **Resource Control** | Limited in compose file | Full Docker run options |
+
+## Step 6: Verify Service Health
 
 ### Check Individual Service Health
 ```bash
@@ -139,7 +467,7 @@ docker exec -it ecommerce_product_db mysql -u root -prootpassword -e "USE produc
 docker exec -it ecommerce_order_db mysql -u root -prootpassword -e "USE order_service; SHOW TABLES;"
 ```
 
-## Step 6: API Testing
+## Step 7: API Testing
 
 ### Test User Service APIs
 ```bash
@@ -207,7 +535,7 @@ curl -X POST http://localhost:8080/api/cart \
   }'
 ```
 
-## Step 7: Cross-Service Integration Testing
+## Step 8: Cross-Service Integration Testing
 
 ### Test Complete User Journey
 ```bash
@@ -245,7 +573,7 @@ INVENTORY=$(curl -s http://localhost:8080/api/inventory/1)
 echo "Inventory: $INVENTORY"
 ```
 
-## Step 8: Performance and Load Testing
+## Step 9: Performance and Load Testing
 
 ### Basic Load Test
 ```bash
@@ -270,7 +598,7 @@ for i in {1..10}; do
 done
 ```
 
-## Step 9: Monitoring and Logs
+## Step 10: Monitoring and Logs
 
 ### View Service Logs
 ```bash
@@ -310,7 +638,7 @@ docker exec ecommerce-order-service curl -s http://user-service:3001/health
 docker exec ecommerce-api-gateway curl -s http://user-service:3001/health
 ```
 
-## Step 10: Troubleshooting
+## Step 11: Troubleshooting
 
 ### Common Issues and Solutions
 
@@ -351,7 +679,40 @@ curl http://localhost:3003/health
 docker logs ecommerce-api-gateway
 ```
 
-## Step 11: Cleanup and Documentation
+#### Docker Compose Issues
+```bash
+# If docker-compose command not found, install it:
+sudo pip3 install docker-compose
+
+# Or use the standalone version:
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Verify installation
+docker-compose --version
+```
+
+#### Docker Permission Issues
+```bash
+# If you get "permission denied" error:
+# Option 1: Restart Docker daemon (recommended)
+sudo systemctl restart docker
+
+# Option 2: Start new shell session with docker group
+newgrp docker
+
+# Option 3: Logout and login again
+exit
+# Then SSH back in
+
+# Option 4: Use sudo (temporary workaround)
+sudo docker-compose build
+
+# Verify Docker access
+docker ps
+```
+
+## Step 12: Cleanup and Documentation
 
 ### Document Test Results
 ```bash

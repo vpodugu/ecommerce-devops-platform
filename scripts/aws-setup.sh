@@ -47,7 +47,7 @@ print_status "Updating system packages..."
 sudo yum update -y
 
 print_status "Installing required packages..."
-sudo yum install -y git docker docker-compose-plugin curl wget vim htop httpd-tools
+sudo yum install -y git docker curl wget vim htop httpd-tools python3-pip
 
 print_status "Starting and enabling Docker service..."
 sudo systemctl start docker
@@ -55,6 +55,9 @@ sudo systemctl enable docker
 
 print_status "Adding ec2-user to docker group..."
 sudo usermod -aG docker ec2-user
+
+print_status "Installing Docker Compose..."
+sudo pip3 install docker-compose
 
 print_status "Creating project directory..."
 mkdir -p ~/ecommerce-devops
