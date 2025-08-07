@@ -9,7 +9,7 @@ COPY package*.json ./
 
 # Install dependencies with retry and clear cache
 RUN npm cache clean --force && \
-    npm ci --no-optional
+    npm install --no-optional
 
 # Copy source code
 COPY . .
