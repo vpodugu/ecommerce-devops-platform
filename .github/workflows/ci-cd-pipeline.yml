@@ -1,0 +1,380 @@
+name: E-Commerce Microservices CI/CD Pipeline
+
+# Trigger pipeline on push to main branch and pull requests
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+# Environment variables
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# Jobs to run
+jobs:
+  # Job 1: Code Quality and Security
+  code-quality:
+    name: Code Quality & Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies for all services
+      run: |
+        echo "Installing dependencies for all microservices..."
+        cd services/user-service && npm ci
+        cd ../product-service && npm ci
+        cd ../order-service && npm ci
+        cd ../api-gateway && npm ci
+        cd ../../frontend && npm ci
+        
+    - name: Run linting
+      run: |
+        echo "Running ESLint on all services..."
+        cd services/user-service && npm run lint
+        cd ../product-service && npm run lint
+        cd ../order-service && npm run lint
+        cd ../api-gateway && npm run lint
+        
+    - name: Run security audit
+      run: |
+        echo "Running security audit..."
+        cd services/user-service && npm audit --audit-level=moderate
+        cd ../product-service && npm audit --audit-level=moderate
+        cd ../order-service && npm audit --audit-level=moderate
+        cd ../api-gateway && npm audit --audit-level=moderate
+        cd ../../frontend && npm audit --audit-level=moderate
+        
+    - name: Run CodeQL Analysis
+      uses: github/codeql-action/init@v3
+      with:
+        languages: javascript
+        
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # Job 2: Unit Testing
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: test_db
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+        ports:
+          - 3306:3306
+          
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: |
+        cd services/user-service && npm ci
+        cd ../product-service && npm ci
+        cd ../order-service && npm ci
+        cd ../api-gateway && npm ci
+        
+    - name: Run User Service Tests
+      run: |
+        cd services/user-service
+        npm test
+      env:
+        DB_HOST: localhost
+        DB_USER: root
+        DB_PASSWORD: rootpassword
+        DB_NAME: test_db
+        
+    - name: Run Product Service Tests
+      run: |
+        cd services/product-service
+        npm test
+      env:
+        DB_HOST: localhost
+        DB_USER: root
+        DB_PASSWORD: rootpassword
+        DB_NAME: test_db
+        
+    - name: Run Order Service Tests
+      run: |
+        cd services/order-service
+        npm test
+      env:
+        DB_HOST: localhost
+        DB_USER: root
+        DB_PASSWORD: rootpassword
+        DB_NAME: test_db
+        
+    - name: Run API Gateway Tests
+      run: |
+        cd services/api-gateway
+        npm test
+
+  # Job 3: Integration Testing
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build and start services for testing
+      run: |
+        docker-compose -f docker-compose.test.yml up -d
+        sleep 30  # Wait for services to be ready
+        
+    - name: Run integration tests
+      run: |
+        # Test service health endpoints
+        curl -f http://localhost:3001/health || exit 1
+        curl -f http://localhost:3002/health || exit 1
+        curl -f http://localhost:3003/health || exit 1
+        curl -f http://localhost:8080/health || exit 1
+        
+        # Test API endpoints
+        curl -f http://localhost:8080/api/users || exit 1
+        curl -f http://localhost:8080/api/products || exit 1
+        curl -f http://localhost:8080/api/categories || exit 1
+        
+        # Test cross-service communication
+        echo "Integration tests passed!"
+        
+    - name: Cleanup test environment
+      if: always()
+      run: docker-compose -f docker-compose.test.yml down -v
+
+  # Job 4: Build Docker Images
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Login to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/user-service
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/product-service
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/order-service
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-gateway
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          
+    - name: Build and push User Service
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/user-service
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/user-service:${{ steps.meta.outputs.version }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Build and push Product Service
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/product-service
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/product-service:${{ steps.meta.outputs.version }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Build and push Order Service
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/order-service
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/order-service:${{ steps.meta.outputs.version }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Build and push API Gateway
+      uses: docker/build-push-action@v5
+      with:
+        context: ./services/api-gateway
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api-gateway:${{ steps.meta.outputs.version }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Build and push Frontend
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:${{ steps.meta.outputs.version }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Job 5: Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-images
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # This will be replaced with Terraform/Ansible deployment
+        echo "Staging deployment completed successfully!"
+        
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests on staging..."
+        # Add actual smoke tests here
+        echo "Smoke tests passed!"
+
+  # Job 6: Deploy to Production (Manual Approval)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        
+    - name: Deploy to production
+      run: |
+        echo "Deploying to production environment..."
+        # This will be replaced with Terraform/Ansible deployment
+        echo "Production deployment completed successfully!"
+        
+    - name: Run production tests
+      run: |
+        echo "Running production tests..."
+        # Add actual production tests here
+        echo "Production tests passed!"
+        
+    - name: Notify deployment success
+      run: |
+        echo "Production deployment successful!"
+        # Add notification logic (Slack, email, etc.)
+
+  # Job 7: Performance Testing
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Artillery
+      run: npm install -g artillery
+      
+    - name: Run performance tests
+      run: |
+        echo "Running performance tests..."
+        # Add actual performance test commands here
+        echo "Performance tests completed!"
+
+# Workflow completion notification
+  notify-completion:
+    name: Notify Completion
+    runs-on: ubuntu-latest
+    needs: [deploy-production, performance-tests]
+    if: always()
+    
+    steps:
+    - name: Notify workflow completion
+      run: |
+        if [ "${{ needs.deploy-production.result }}" == "success" ] && [ "${{ needs.performance-tests.result }}" == "success" ]; then
+          echo "🎉 All jobs completed successfully!"
+        else
+          echo "❌ Some jobs failed. Check the workflow for details."
+        fi

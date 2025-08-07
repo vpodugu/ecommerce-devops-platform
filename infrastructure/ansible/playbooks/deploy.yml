@@ -1,0 +1,156 @@
+---
+# E-Commerce Microservices Deployment Playbook
+# This playbook deploys the complete microservices platform
+
+- name: Deploy E-Commerce Microservices Platform
+  hosts: all
+  become: yes
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/{{ environment }}.yml
+
+  pre_tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update package cache (RedHat)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+  roles:
+    - common
+    - docker
+    - docker-compose
+    - monitoring
+
+  tasks:
+    - name: Create application directory
+      file:
+        path: "{{ app_directory }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+
+    - name: Copy application files
+      copy:
+        src: "{{ playbook_dir }}/../../"
+        dest: "{{ app_directory }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+
+    - name: Create environment file
+      template:
+        src: env.j2
+        dest: "{{ app_directory }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0600'
+
+    - name: Pull latest Docker images
+      docker_image:
+        name: "{{ item.image }}"
+        tag: "{{ item.tag }}"
+        source: pull
+        force_source: yes
+      loop: "{{ docker_images }}"
+      register: image_pull_result
+
+    - name: Build Docker images
+      docker_image:
+        name: "{{ item.name }}"
+        build:
+          path: "{{ app_directory }}/{{ item.path }}"
+          dockerfile: "{{ item.dockerfile }}"
+        tag: "{{ item.tag }}"
+        force_build: yes
+      loop: "{{ docker_build_images }}"
+      register: image_build_result
+
+    - name: Stop existing containers
+      docker_compose:
+        project_src: "{{ app_directory }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Start application with Docker Compose
+      docker_compose:
+        project_src: "{{ app_directory }}"
+        state: present
+        build: yes
+        pull: yes
+        restarted: yes
+
+    - name: Wait for services to be ready
+      wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
+        delay: 10
+        timeout: 300
+      loop: "{{ service_health_checks }}"
+
+    - name: Verify service health
+      uri:
+        url: "http://{{ item.host }}:{{ item.port }}/health"
+        method: GET
+        status_code: 200
+        timeout: 30
+      loop: "{{ service_health_checks }}"
+      register: health_check_result
+
+    - name: Display health check results
+      debug:
+        msg: "Service {{ item.item.host }}:{{ item.item.port }} - Status: {{ item.status }}"
+      loop: "{{ health_check_result.results }}"
+
+    - name: Run smoke tests
+      uri:
+        url: "http://{{ item.url }}"
+        method: GET
+        status_code: "{{ item.expected_status }}"
+        timeout: 30
+      loop: "{{ smoke_tests }}"
+      register: smoke_test_result
+
+    - name: Display smoke test results
+      debug:
+        msg: "Smoke test {{ item.item.url }} - Status: {{ item.status }}"
+      loop: "{{ smoke_test_result.results }}"
+
+    - name: Setup log rotation
+      template:
+        src: logrotate.conf.j2
+        dest: /etc/logrotate.d/ecommerce
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Setup monitoring
+      include_tasks: ../roles/monitoring/tasks/main.yml
+
+    - name: Send deployment notification
+      uri:
+        url: "{{ notification_webhook }}"
+        method: POST
+        body_format: json
+        body:
+          text: "Deployment completed successfully on {{ inventory_hostname }}"
+          environment: "{{ environment }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+      when: notification_webhook is defined
+      ignore_errors: yes
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+
+    - name: reload logrotate
+      shell: logrotate -f /etc/logrotate.d/ecommerce
+      become: yes
