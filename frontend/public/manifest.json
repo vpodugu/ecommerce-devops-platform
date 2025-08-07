@@ -1,0 +1,9 @@
+{
+  "short_name": "E-Commerce DevOps",
+  "name": "E-Commerce Microservices Platform",
+  "icons": [],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}
