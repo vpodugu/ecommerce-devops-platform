@@ -29,17 +29,17 @@ const authenticateToken = (req, res, next) => {
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
     const result = await database.query(
-      'SELECT id, username, email, first_name, last_name, created_at, last_login FROM users WHERE id = $1',
+      'SELECT id, username, email, first_name, last_name, created_at, last_login FROM users WHERE id = ?',
       [req.user.userId]
     );
 
-    if (result.rows.length === 0) {
+    if (result.length === 0) {
       return res.status(404).json({
         error: 'User not found'
       });
     }
 
-    const user = result.rows[0];
+    const user = result[0];
     res.json({
       user: {
         id: user.id,
@@ -68,15 +68,15 @@ router.put('/profile', authenticateToken, async (req, res) => {
     let paramCount = 1;
 
     if (firstName !== undefined) {
-      updates.first_name = `$${paramCount++}`;
+      updates.first_name = '?';
       values.push(firstName);
     }
     if (lastName !== undefined) {
-      updates.last_name = `$${paramCount++}`;
+      updates.last_name = '?';
       values.push(lastName);
     }
     if (email !== undefined) {
-      updates.email = `$${paramCount++}`;
+      updates.email = '?';
       values.push(email);
     }
 
@@ -93,17 +93,21 @@ router.put('/profile', authenticateToken, async (req, res) => {
     values.push(req.user.userId);
 
     const result = await database.query(
-      `UPDATE users SET ${setClause}, updated_at = NOW() WHERE id = $${paramCount} RETURNING id, username, email, first_name, last_name, updated_at`,
+      `UPDATE users SET ${setClause}, updated_at = NOW() WHERE id = ?`,
       values
     );
 
-    if (result.rows.length === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({
         error: 'User not found'
       });
     }
 
-    const user = result.rows[0];
+    const userResult = await database.query(
+      'SELECT id, username, email, first_name, last_name, updated_at FROM users WHERE id = ?',
+      [req.user.userId]
+    );
+    const user = userResult[0];
     res.json({
       message: 'Profile updated successfully',
       user: {
@@ -137,15 +141,15 @@ router.get('/', authenticateToken, async (req, res) => {
     const offset = (page - 1) * limit;
 
     const result = await database.query(
-      'SELECT id, username, email, first_name, last_name, created_at, last_login FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+      'SELECT id, username, email, first_name, last_name, created_at, last_login FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?',
       [limit, offset]
     );
 
-    const countResult = await database.query('SELECT COUNT(*) FROM users');
-    const total = parseInt(countResult.rows[0].count);
+    const countResult = await database.query('SELECT COUNT(*) as count FROM users');
+    const total = parseInt(countResult[0].count);
 
     res.json({
-      users: result.rows.map(user => ({
+      users: result.map(user => ({
         id: user.id,
         username: user.username,
         email: user.email,

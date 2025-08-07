@@ -20,11 +20,15 @@ router.post('/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     
     const result = await database.query(
-      'INSERT INTO users (username, email, password_hash, first_name, last_name) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, email, first_name, last_name, created_at',
+      'INSERT INTO users (username, email, password_hash, first_name, last_name, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
       [username, email, hashedPassword, firstName, lastName]
     );
 
-    const user = result.rows[0];
+    const userResult = await database.query(
+      'SELECT id, username, email, first_name, last_name, created_at FROM users WHERE id = ?',
+      [result.insertId]
+    );
+    const user = userResult[0];
     
     const token = jwt.sign(
       { userId: user.id, username: user.username },
@@ -72,17 +76,17 @@ router.post('/login', async (req, res) => {
     }
 
     const result = await database.query(
-      'SELECT * FROM users WHERE username = $1 OR email = $1',
-      [username]
+      'SELECT * FROM users WHERE username = ? OR email = ?',
+      [username, username]
     );
 
-    if (result.rows.length === 0) {
+    if (result.length === 0) {
       return res.status(401).json({
         error: 'Invalid credentials'
       });
     }
 
-    const user = result.rows[0];
+    const user = result[0];
     const validPassword = await bcrypt.compare(password, user.password_hash);
 
     if (!validPassword) {
@@ -98,7 +102,7 @@ router.post('/login', async (req, res) => {
     );
 
     await database.query(
-      'UPDATE users SET last_login = NOW() WHERE id = $1',
+      'UPDATE users SET last_login = NOW() WHERE id = ?',
       [user.id]
     );
 
