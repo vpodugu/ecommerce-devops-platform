@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   # ========================================
@@ -277,7 +276,7 @@ services:
     container_name: ecommerce_grafana
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "3004:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin123
     volumes:
