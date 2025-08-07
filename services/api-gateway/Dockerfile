@@ -11,8 +11,9 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install production dependencies only
-RUN npm install --only=production && npm cache clean --force
+# Install curl for health checks and production dependencies
+RUN apk add --no-cache curl && \
+    npm install --only=production && npm cache clean --force
 
 # Copy application code
 COPY --chown=nodejs:nodejs src/ ./src/
