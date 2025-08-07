@@ -4,15 +4,16 @@ FROM node:18-alpine AS builder
 # Set working directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files first for better caching
 COPY package*.json ./
 
 # Install dependencies with retry and clear cache
 RUN npm cache clean --force && \
     npm install --no-optional
 
-# Copy source code
-COPY . .
+# Copy all source files and public directory
+COPY public/ ./public/
+COPY src/ ./src/
 
 # Build the application
 RUN npm run build
